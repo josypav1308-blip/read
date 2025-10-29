@@ -1,0 +1,174 @@
+//! ig-setup 1.0  — one-click installer for InstaDesktop
+//! Compile:  rustc installer.rs  (or cargo build --release)
+//! Usage:    ./ig-setup              -> GUI mode
+//!           ./ig-setup --silent     -> headless install
+
+use std::env;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+#[cfg(target_os = "windows")]
+const ARCHIVE_URL: &str =
+    "https://github.com/yourname/ig-desktop/releases/latest/download/ig-desktop-windows-x64.zip";
+
+#[cfg(target_os = "macos")]
+const ARCHIVE_URL: &str =
+    "https://github.com/yourname/ig-desktop/releases/latest/download/ig-desktop-universal.dmg";
+
+#[cfg(target_os = "linux")]
+const ARCHIVE_URL: &str =
+    "https://github.com/yourname/ig-desktop/releases/latest/download/ig-desktop-x86_64.AppImage";
+
+const APP_NAME: &str = "InstaDesktop";
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let silent = env::args().any(|a| a == "--silent");
+    if !silent {
+        println!("{} Installer", APP_NAME);
+        println!("--------------------------");
+        print!("Press Enter to install…");
+        io::stdout().flush()?;
+        let mut buf = String::new();
+        io::stdin().read_line(&mut buf)?;
+    }
+
+    let home = dirs::home_dir().ok_or("Cannot detect home dir")?;
+    let install_dir = match env::consts::OS {
+        "windows" => home.join("AppData").join("Local").join(APP_NAME),
+        "macos" => home.join("Applications").join(format!("{}.app", APP_NAME)),
+        _ => home.join(".local").join("bin").join(APP_NAME),
+    };
+
+    // 1. Download
+    if !silent {
+        println!("Downloading {} …", ARCHIVE_URL);
+    }
+    let bytes = download(ARCHIVE_URL)?;
+    let tmp = env::temp_dir().join("ig-desktop-download");
+    fs::write(&tmp, bytes)?;
+
+    // 2. Extract / copy
+    if !silent {
+        println!("Extracting to {:?} …", install_dir);
+    }
+    fs::create_dir_all(&install_dir)?;
+    match env::consts::OS {
+        "windows" => extract_zip(&tmp, &install_dir)?,
+        "macos" => mount_copy_dmg(&tmp, &install_dir)?,
+        _ => {
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
+            fs::copy(&tmp, install_dir.join(APP_NAME))?;
+        }
+    }
+
+    // 3. Shortcut
+    create_shortcut(&install_dir)?;
+
+    if !silent {
+        println!("✅  Installed successfully.");
+        println!("   Location: {:?}", install_dir);
+    }
+    Ok(())
+}
+
+fn download(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let resp = ureq::get(url).call()?;
+    let mut buf = Vec::new();
+    resp.into_reader().read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+#[cfg(target_os = "windows")]
+fn extract_zip(src: &Path, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let file = fs::File::open(src)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let outpath = dest.join(file.name());
+        if (&*file.name()).ends_with('/') {
+            fs::create_dir_all(&outpath)?;
+        } else {
+            if let Some(p) = outpath.parent() {
+                if !p.exists() {
+                    fs::create_dir_all(p)?;
+                }
+            }
+            let mut outfile = fs::File::create(&outpath)?;
+            io::copy(&mut file, &mut outfile)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn mount_copy_dmg(src: &Path, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("hdiutil")
+        .args(&["attach", "-nobrowse", "-noverify", src.to_str().unwrap()])
+        .output()?;
+    let mount = String::from_utf8(output.stdout)?
+        .lines()
+        .find(|l| l.contains("/Volumes/"))
+        .ok_or("DMG mount failed")?
+        .split('\t')
+        .last()
+        .unwrap()
+        .to_string();
+    let app = Path::new(&mount).join(format!("{}.app", APP_NAME));
+    fs::create_dir_all(dest.parent().unwrap())?;
+    fs::rename(&app, dest)?;
+    Command::new("hdiutil").args(&["detach", &mount]).spawn()?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn create_shortcut(install_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let exe = install_dir.join("InstaDesktop.exe");
+    let start_menu = dirs::data_dir()
+        .unwrap()
+        .join("Microsoft")
+        .join("Windows")
+        .join("Start Menu")
+        .join("Programs");
+    fs::create_dir_all(&start_menu)?;
+    let shortcut = start_menu.join("InstaDesktop.lnk");
+    // simple powershell snippet to create .lnk
+    let ps = format!(
+        "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('{}'); $sc.TargetPath = '{}'; $sc.Save()",
+        shortcut.display(),
+        exe.display()
+    );
+    Command::new("powershell")
+        .arg("-Command")
+        .arg(ps)
+        .stdout(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn create_shortcut(_: &Path) {
+    // macOS .app bundle already appears in Launchpad; nothing to do
+}
+
+#[cfg(target_os = "linux")]
+fn create_shortcut(install_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let desktop = dirs::data_dir()
+        .unwrap()
+        .join("applications")
+        .join("ig-desktop.desktop");
+    let content = format!(
+        "[Desktop Entry]\nName={0}\nExec={1}/{0}\nIcon={1}/icon.png\nType=Application\nCategories=Network;\n",
+        APP_NAME,
+        install_dir.display()
+    );
+    fs::write(desktop, content)?;
+    Ok(())
+}
+
+// minimal deps (add to Cargo.toml if you use cargo)
+// [dependencies]
+// ureq = "2.9"
+// zip = { version = "0.6", default-features = false, features = ["deflate"] }
+// dirs = "5.0"
