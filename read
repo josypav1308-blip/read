@@ -1,0 +1,16 @@
+├─ src-tauri/          – Rust side (Tauri)
+│  ├─ src/
+│  │  └─ main.rs       – exposes “get_posts”, “add_post”, “toggle_like”
+│  ├─ Cargo.toml
+│  └─ tauri.conf.json
+├─ src/                 – React + TypeScript
+│  ├─ components/
+│  │  ├─ Feed.tsx
+│   │  ├─ PostCard.tsx
+│  │  └─ ThemeToggle.tsx
+│  ├─ hooks/
+│  ├─ style/
+│  ├─ App.tsx
+│  └─ main.tsx
+├─ public/
+├─ package.json
